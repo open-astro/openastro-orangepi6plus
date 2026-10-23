@@ -1,0 +1,19 @@
+[Unit]
+Description=OpenAstro offline disk installer (console)
+After=local-fs.target systemd-user-sessions.service
+Conflicts=getty@tty1.service
+ConditionPathExists=/opt/openastro-installer/manifest.json
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+ExecStart=/usr/local/sbin/openastro-install
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=multi-user.target

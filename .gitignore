@@ -1,3 +1,5 @@
 *.img.xz
 *.img
 images/
+.idea/
+__pycache__/

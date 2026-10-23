@@ -1,44 +1,68 @@
 #!/bin/bash
-# OpenAstro layer for the Orange Pi 4 Pro (Allwinner A733 / sun60iw2).
+# OpenAstro layer for the Orange Pi 6 Plus (CIX CD8180/CD8160).
+# Modified 2026-10-23 for this port; licensed under GPLv2.
 #
-# This turns a stock Armbian "Orange Pi 4 Pro" image (Debian 13 Trixie minimal
-# CLI, vendor 6.6 kernel) into the OpenAstro OS: a WiFi access point
+# This turns a stock Armbian ARM64 UEFI image (Debian 13 Trixie minimal
+# CLI, current kernel) into the OpenAstro OS: a WiFi access point
 # (OpenAstro / 12345678), baked-in credentials (astro/astro, no first-boot
 # wizard), and the plumbing AlpacaBridge expects. The OS runs from the microSD
 # card - there is no eMMC/SPI install step. On first boot the SSID gains a
-# per-board suffix from the wlan0 MAC (e.g. OpenAstro-915D) so multiple
+# per-board suffix from the selected WiFi MAC (e.g. OpenAstro-915D) so multiple
 # boards don't collide.
 #
 # AlpacaBridge is preinstalled from the OpenAstro apt repository
 # (apt.openastro.net) and stays current with apt upgrade.
 #
-# WiFi/BT is an AIC8800D80 combo chip (vendor driver in the Armbian image; BT
-# is UART HCI). The AP is a NetworkManager keyfile connection (mode=ap,
-# ipv4.method=shared) on a dedicated virtual AP interface (ap0): the driver
-# advertises (and hardware-validated 2026-08-13 delivers) concurrent AP+STA -
-# 1 managed + 1 AP, up to 3 channels - so the hotspot stays up on 2.4 GHz ch6
-# while wlan0 is free to join the user's network on either band (the ASIAIR
-# uap0 pattern). 2.4 GHz is the AP default for range and to keep the mixed-
-# band concurrency case the tested one; AP_BAND=a AP_CHANNEL=36 for 5 GHz
-# (also validated standalone 2026-08-09, see AlpacaBridge
-# docs/opi4pro-image-notes.md). The AP autoconnects at boot so the board is
-# always reachable via its own hotspot.
+# AX210 is the initial target, but the AP helper discovers other adapters.
+# Concurrency is driver-dependent: Intel AP+client uses one shared channel,
+# and Intel AP mode is limited to 2.4 GHz. Do not assume 4 Pro WiFi behavior.
 #
-# Idempotent: safe to re-run. Runs as root, either in the image-build chroot
+# Re-running resets credentials and networking. Run as root in the image-build chroot
 # (build/build-openastro-image.sh) or post-flash on a booted board.
 
 set -euo pipefail
+export LC_ALL=C
 
 # --- Config (override via env) ---
 AP_SSID="${AP_SSID:-OpenAstro}"
 AP_PASSPHRASE="${AP_PASSPHRASE:-12345678}"
 AP_IP="${AP_IP:-172.24.1.1}"                # pinned (not NM's 10.42.0.1 default) so docs can give a fixed bridge IP
-AP_BAND="${AP_BAND:-bg}"                    # 2.4 GHz: range + validated concurrent with a 5 GHz client; "a"/36 = 5 GHz
+AP_BAND="${AP_BAND:-bg}"                    # AX210 AP mode supports 2.4 GHz only
 AP_CHANNEL="${AP_CHANNEL:-6}"
-AP_COUNTRY="${AP_COUNTRY:-US}"
+AP_COUNTRY="${AP_COUNTRY:-00}"              # set your actual country, never guess it
+AP_INTERFACE="${AP_INTERFACE:-}"            # optional parent interface; otherwise discover an AP-capable adapter
+OA_HOSTNAME="${OPENASTRO_HOSTNAME:-openastro}"
+OA_USER="${OPENASTRO_USER:-astro}"
+OA_PASS="${OPENASTRO_PASS:-astro}"
+SETUPDIR="$(cd "$(dirname "$0")" && pwd)"
 
 log() { echo "[openastro] $*"; }
 [ "$(id -u)" -eq 0 ] || { echo "Must run as root." >&2; exit 1; }
+fail() { echo "[openastro] $*" >&2; exit 1; }
+[ "$(dpkg --print-architecture)" = arm64 ] || fail "Expected ARM64."
+if ! grep -qx 'ID=debian' /etc/os-release || ! grep -qx 'VERSION_CODENAME=trixie' /etc/os-release; then
+    fail "Expected Debian Trixie."
+fi
+[ -f "$SETUPDIR/openastro-ap-iface.sh" ] || fail "Missing companion openastro-ap-iface.sh."
+[ -f "$SETUPDIR/assets/grub-background.png" ] || fail "Missing OpenAstro GRUB artwork."
+# Keep values safe for the NetworkManager keyfile and per-board suffix.
+[[ "$AP_SSID" =~ ^[a-zA-Z0-9][a-zA-Z0-9\ ._-]{0,26}$ ]] || fail "SSID must be 1-27 simple ASCII characters (letters, digits, spaces, ._-)."
+[ "${#AP_PASSPHRASE}" -ge 8 ] && [ "${#AP_PASSPHRASE}" -le 63 ] || fail "AP passphrase must be 8-63 characters."
+[[ ! "$AP_PASSPHRASE" =~ [[:cntrl:]] && "$AP_PASSPHRASE" != *\\* && "$AP_PASSPHRASE" != ' '* && "$AP_PASSPHRASE" != *' ' ]] || fail "AP passphrase cannot contain control characters, backslashes, or edge spaces."
+[[ "$AP_COUNTRY" =~ ^([A-Z]{2}|00)$ ]] || fail "AP_COUNTRY must be an uppercase two-letter country code or 00."
+[[ "$AP_BAND" = bg || "$AP_BAND" = a ]] || fail "AP_BAND must be bg or a."
+[[ "$AP_CHANNEL" =~ ^[1-9][0-9]{0,2}$ ]] || fail "Invalid AP channel."
+[[ -z "$AP_INTERFACE" || "$AP_INTERFACE" =~ ^[a-zA-Z0-9_.:-]+$ ]] || fail "Invalid parent interface."
+[[ "$AP_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "AP_IP must be an IPv4 address."
+IFS=. read -r -a octets <<< "$AP_IP"
+[ "${#octets[@]}" -eq 4 ] || fail "AP_IP must be an IPv4 address."
+for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$octet" -le 255 ] || fail "Invalid AP_IP."
+done
+[ "${octets[3]}" -gt 0 ] && [ "${octets[3]}" -lt 255 ] || fail "AP_IP must be a host in its /24 subnet."
+[[ "$OA_HOSTNAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || fail "Invalid hostname."
+[[ "$OA_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || fail "Invalid username."
+[[ -n "$OA_PASS" && ! "$OA_PASS" =~ [[:cntrl:]:] ]] || fail "Login password cannot be empty or contain colons/control characters."
 
 # ============================================================
 # Packages
@@ -58,14 +82,22 @@ apt-get update -qq
 # them hotspot clients get DHCP+DNS but silently no internet.
 apt-get install -y -qq \
     network-manager wpasupplicant polkitd dnsmasq-base nftables iw wireless-regdb \
-    ca-certificates curl gnupg \
+    ca-certificates curl gnupg iproute2 openssh-server sudo avahi-daemon bluez \
+    firmware-iwlwifi firmware-atheros firmware-brcm80211 firmware-mediatek firmware-realtek \
     >/dev/null
+
+# GRUB branding; board firmware and the kernel's compiled-in logo are separate.
+install -D -m 0644 "$SETUPDIR/assets/grub-background.png" /usr/share/images/openastro/grub-background.png
+cat > /etc/default/grub.d/99-openastro-branding.cfg <<'EOF'
+GRUB_DISTRIBUTOR="OpenAstro"
+GRUB_BACKGROUND="/usr/share/images/openastro/grub-background.png"
+EOF
 
 # ============================================================
 # Networking (NetworkManager manages everything - fleet standard)
 # ============================================================
-# NM owns all interfaces, matching the Raspberry Pi image: ethernet (end0)
-# gets NM's default DHCP, wlan0 runs the AP. The AP is an NM keyfile
+# NM owns all interfaces: both Ethernet ports get DHCP and WiFi runs the AP.
+# The AP is an NM keyfile
 # connection with mode=ap and ipv4.method=shared - NM's internal dnsmasq
 # serves DHCP/DNS and sets up NAT to whatever uplink exists, replacing the
 # old hostapd + dnsmasq + iptables stack. AlpacaBridge's WiFi manager drives
@@ -86,35 +118,18 @@ network:
 EOF
     chmod 600 /etc/netplan/10-openastro.yaml
 fi
-systemctl disable systemd-networkd.service systemd-networkd.socket >/dev/null 2>&1 || true
+systemctl disable systemd-networkd.service systemd-networkd.socket systemd-networkd-wait-online.service >/dev/null 2>&1 || true
 
-# Dedicated AP interface: the hotspot lives on ap0 so wlan0 stays free for
-# client mode - joining a network from the AlpacaBridge WiFi card no longer
-# drops the hotspot. ap0 must exist before NM starts; a oneshot creates it
-# from phy0 each boot (virtual interfaces don't persist). Its MAC is wlan0's
-# with the locally-administered bit set, so the two interfaces never collide.
-cat > /usr/local/sbin/openastro-ap-iface <<'EOF'
-#!/bin/bash
-set -euo pipefail
-for _ in $(seq 1 60); do
-    [ -d /sys/class/ieee80211/phy0 ] && break
-    sleep 1
-done
-[ -d /sys/class/ieee80211/phy0 ] || exit 0
-ip link show ap0 >/dev/null 2>&1 && exit 0
-iw phy phy0 interface add ap0 type __ap
-if [ -r /sys/class/net/wlan0/address ]; then
-    mac=$(cat /sys/class/net/wlan0/address)
-    first=$(( (0x${mac%%:*} | 0x02) & 0xfe ))
-    ip link set ap0 address "$(printf '%02x' "$first")${mac#??}" || true
-fi
-EOF
-chmod 755 /usr/local/sbin/openastro-ap-iface
+# Virtual ap0 is preferred; AP-only drivers fall back to their physical interface.
+install -m 0755 "$SETUPDIR/openastro-ap-iface.sh" /usr/local/sbin/openastro-ap-iface
+install -d /etc/default /etc/NetworkManager/conf.d
+printf 'AP_INTERFACE=%q\nAP_COUNTRY=%q\n' "$AP_INTERFACE" "$AP_COUNTRY" > /etc/default/openastro-ap
 
 cat > /etc/systemd/system/openastro-ap-iface.service <<'EOF'
 [Unit]
 Description=OpenAstro: create dedicated AP interface (ap0)
 Before=NetworkManager.service
+After=systemd-udev-trigger.service
 
 [Service]
 Type=oneshot
@@ -135,6 +150,7 @@ systemctl enable openastro-ap-iface.service >/dev/null 2>&1
 # at ${AP_IP} via its own AP even when the user can't log in over their LAN.
 AP_UUID=$(cat /proc/sys/kernel/random/uuid)
 mkdir -p /etc/NetworkManager/system-connections
+install -m 0600 /dev/null /etc/NetworkManager/system-connections/OpenAstro-AP.nmconnection
 cat > /etc/NetworkManager/system-connections/OpenAstro-AP.nmconnection <<EOF
 [connection]
 id=OpenAstro-AP
@@ -142,8 +158,7 @@ uuid=${AP_UUID}
 type=wifi
 interface-name=ap0
 autoconnect=true
-# Below default (0): saved client networks are tried first; the hotspot is
-# the fallback when none of them connects.
+# Prefer saved client networks on drivers that must share one interface.
 autoconnect-priority=-10
 # Retry forever: with the default (4 attempts) a slow first boot - vendor WiFi
 # firmware or dnsmasq not ready yet - permanently blocks the AP until reboot.
@@ -161,7 +176,7 @@ psk=${AP_PASSPHRASE}
 
 [ipv4]
 method=shared
-addresses=${AP_IP}/24
+address1=${AP_IP}/24
 
 [ipv6]
 method=disabled
@@ -172,52 +187,15 @@ chmod 600 /etc/NetworkManager/system-connections/OpenAstro-AP.nmconnection
 # again on next boot.
 rm -f /var/lib/openastro/ssid-set
 
-# Per-board SSID: suffix with the last 4 hex digits of the wlan0 MAC (the A733
-# exposes no serial number - no device-tree serial-number, no cpuinfo Serial,
-# no efuse nvmem - but the AIC8800 MAC is burned in and stable). Runs once on
-# first boot, before NM, so multiple boards at a star party don't collide on
-# the same SSID.
-cat > /usr/local/sbin/openastro-ssid <<'EOF'
-#!/bin/bash
-set -euo pipefail
-for _ in $(seq 1 60); do
-    [ -r /sys/class/net/wlan0/address ] && break
-    sleep 1
-done
-mac=$(tr -d ':' < /sys/class/net/wlan0/address)
-suffix=$(echo "${mac: -4}" | tr 'a-f' 'A-F')
-[ ${#suffix} -eq 4 ] || exit 0   # no/odd MAC: keep the generic SSID
-sed -i "s/^ssid=\(.*\)/ssid=\1-${suffix}/" \
-    /etc/NetworkManager/system-connections/OpenAstro-AP.nmconnection
-EOF
-chmod 755 /usr/local/sbin/openastro-ssid
-
-cat > /etc/systemd/system/openastro-ssid.service <<'EOF'
-[Unit]
-Description=OpenAstro: per-board AP SSID from wlan0 MAC
-Before=NetworkManager.service
-ConditionPathExists=!/var/lib/openastro/ssid-set
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/openastro-ssid
-ExecStartPost=/bin/mkdir -p /var/lib/openastro
-ExecStartPost=/bin/touch /var/lib/openastro/ssid-set
-
-[Install]
-WantedBy=multi-user.target
-EOF
-mkdir -p /etc/systemd/system/NetworkManager.service.d
-cat > /etc/systemd/system/NetworkManager.service.d/openastro-ssid.conf <<'EOF'
-[Unit]
-After=openastro-ssid.service
-Wants=openastro-ssid.service
-EOF
-systemctl enable openastro-ssid.service >/dev/null 2>&1
+# The AP helper also sets the SSID, so it cannot race radio discovery.
+systemctl disable openastro-ssid.service >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/openastro-ssid.service \
+    /etc/systemd/system/NetworkManager.service.d/openastro-ssid.conf \
+    /usr/local/sbin/openastro-ssid
 
 # Regdom for the 5 GHz AP (hostapd used to set this via country_code; the NM
 # path needs it set globally).
-iw reg set "${AP_COUNTRY}" 2>/dev/null || true
+# Apply on the target at boot, never to the image-build host's radio.
 cat > /etc/modprobe.d/openastro-regdom.conf <<EOF
 options cfg80211 ieee80211_regdom=${AP_COUNTRY}
 EOF
@@ -244,6 +222,7 @@ wifi.scan-rand-mac-address=no
 EOF
 
 systemctl enable NetworkManager >/dev/null 2>&1
+systemctl enable ssh avahi-daemon bluetooth >/dev/null 2>&1
 
 log "WiFi AP configured (SSID: ${AP_SSID}, band ${AP_BAND} ch${AP_CHANNEL}, ${AP_IP})."
 
@@ -287,17 +266,15 @@ install -d -m 2755 -g systemd-journal /var/log/journal
 # replugged. Shipping the rule in the image removes that ordering trap.
 cat > /etc/udev/rules.d/70-openastro-zwo-hid.rules <<'EOF'
 # ZWO HID accessories (EAF focuser, EFW/EFWmini filter wheels, CAA rotator)
-SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03c3", GROUP="users", MODE="0666"
-KERNEL=="hiddev*", ATTRS{idVendor}=="03c3", GROUP="users", MODE="0666"
+# Final assignments keep later vendor rules from making HID nodes world-writable.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="03c3", GROUP:="plugdev", MODE:="0660"
+KERNEL=="hiddev*", ATTRS{idVendor}=="03c3", GROUP:="plugdev", MODE:="0660"
 EOF
 
 # ============================================================
 # System identity (turnkey - no Armbian first-boot wizard)
 # ============================================================
 log "Setting system identity..."
-OA_HOSTNAME="${OPENASTRO_HOSTNAME:-openastro}"
-OA_USER="${OPENASTRO_USER:-astro}"
-OA_PASS="${OPENASTRO_PASS:-astro}"
 echo "$OA_HOSTNAME" > /etc/hostname
 if grep -q '^127.0.1.1' /etc/hosts; then sed -i "s/^127.0.1.1.*/127.0.1.1\t$OA_HOSTNAME/" /etc/hosts
 else echo -e "127.0.1.1\t$OA_HOSTNAME" >> /etc/hosts; fi
@@ -306,14 +283,19 @@ echo "${OA_USER}:${OA_PASS}" | chpasswd
 # Disable Armbian's interactive first-login wizard (credentials are baked in).
 systemctl disable armbian-firstlogin.service 2>/dev/null || true
 rm -f /root/.not_logged_in_yet 2>/dev/null || true
+# Remove factory root autologin normally retired by the skipped wizard.
+for override in /etc/systemd/system/{getty@,getty@tty1,serial-getty@,serial-getty@ttyGS0}.service.d/override.conf; do
+    if grep -Eq -- '--autologin[=[:space:]]+root([[:space:]]|$)' "$override" 2>/dev/null; then
+        rm -f "$override"
+    fi
+done
+systemctl daemon-reload >/dev/null 2>&1 || true
 
 # ============================================================
 # AlpacaBridge (preinstalled - the whole point of the appliance;
 # a dark site has no internet to apt install from)
 # ============================================================
-# On by default since AlpacaBridge 3.4.0 shipped the WiFi manager (3.5.0
-# is current on apt.openastro.net; the latest version is always installed)
-# (hardware-validated on this board). Set INSTALL_ALPACABRIDGE=no to skip.
+# Install the repository's current ARM64 package. Set INSTALL_ALPACABRIDGE=no to skip.
 INSTALL_ALPACABRIDGE="${INSTALL_ALPACABRIDGE:-yes}"
 if [ "$INSTALL_ALPACABRIDGE" = yes ]; then
 log "Installing AlpacaBridge from apt.openastro.net..."
@@ -324,5 +306,6 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/opena
 apt-get update -qq
 apt-get install -y -qq alpacabridge >/dev/null
 fi
+if id alpacabridge >/dev/null 2>&1; then usermod -aG plugdev alpacabridge; fi
 
-log "OpenAstro OS layer complete (WiFi AP + identity + AlpacaBridge)."
+log "OpenAstro OS layer complete. Reboot after running directly on a board."

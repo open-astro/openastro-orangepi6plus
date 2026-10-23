@@ -1,129 +1,143 @@
 #!/bin/bash
-# Build the OpenAstro Orange Pi 4 Pro OS image.
-#
-# Customizes a stock Armbian "Orange Pi 4 Pro" image (Debian 13 Trixie minimal
-# CLI, vendor 6.6 kernel) by running the OpenAstro layer
-# (openastro/openastro-setup.sh) inside a chroot, then repacks it as a
-# compressed, flashable image. The build host must be aarch64 (native chroot -
-# no qemu), e.g. another Armbian/Debian arm64 box or the board itself.
-#
+# OpenAstro Orange Pi 6 Plus port, modified 2026-10-23 (GPLv2).
+# Customize a trusted Armbian Trixie ARM64 UEFI image on a native ARM64 host.
 # Usage: sudo build/build-openastro-image.sh <stock-armbian.img[.xz]> [output.img.xz]
-#
-# KERNEL_DEBS=<dir>: install custom kernel .debs (linux-image/-dtb/-headers from
-# armbian-build output/debs) into the image, replacing the stock kernel. Used to
-# ship the CONFIG_HIDRAW-enabled vendor kernel needed for ZWO EAF/EFW.
-#
-# AlpacaBridge 3.5.0+ is preinstalled from apt.openastro.net (needs outbound
-# network in the chroot; INSTALL_ALPACABRIDGE=no to skip).
+# Optional KERNEL_DEBS=<dir>: install matching ARM64 kernel packages.
 set -euo pipefail
 
 REPODIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=build/uefi-image.sh
+source "$REPODIR/build/uefi-image.sh"
 SRC="${1:?usage: $0 <stock-armbian.img[.xz]> [output.img.xz]}"
-OUT="${2:-$REPODIR/images/openastro-orangepi4pro.img.xz}"
-# The staged image grows to ~5+ GB; /tmp is often a small RAM-backed tmpfs,
-# and running out of space mid-build corrupts the loop-mounted filesystem
-# (ENOSPC -> journal abort -> read-only). Pick the first writable dir with
-# at least 8 GB free: $TMPDIR, the repo's images dir, /var/tmp, then /tmp.
+OUT="${2:-$REPODIR/images/openastro-orangepi6plus.img.xz}"
+log() { echo "[build] $*"; }
+die() { echo "[build] $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "Must run as root."
+[ "$(uname -m)" = aarch64 ] || die "Build host must be aarch64 (native chroot)."
+[ -f "$SRC" ] || die "Source must be a regular .img or .img.xz file."
+[ ! -e "$OUT" ] && [ ! -L "$OUT" ] || die "Output already exists; choose a new filename."
+for cmd in python3 parted partprobe losetup blkid e2fsck resize2fs tune2fs fatlabel mount mountpoint findmnt chroot xz sha256sum sfdisk udevadm; do
+    command -v "$cmd" >/dev/null || die "Missing build dependency: $cmd (see README)."
+done
+
+# Keep staging off small RAM-backed /tmp filesystems, especially on the board.
 pick_workdir() {
     local d avail
     for d in "${TMPDIR:-}" "$REPODIR/images" /var/tmp /tmp; do
         [ -n "$d" ] || continue
-        mkdir -p "$d" 2>/dev/null || true
-        [ -d "$d" ] && [ -w "$d" ] || continue
-        avail=$(df -Pk "$d" 2>/dev/null | awk 'NR==2{print $4}')
-        if [ "${avail:-0}" -ge 8388608 ]; then echo "$d"; return 0; fi
+        mkdir -p "$d" 2>/dev/null || continue
+        [ -w "$d" ] || continue
+        avail=$(df -Pk "$d" | awk 'NR==2{print $4}')
+        if [ "${avail:-0}" -ge 12582912 ]; then echo "$d"; return 0; fi
     done
     return 1
 }
-WORKBASE="$(pick_workdir)" || {
-    echo "Need ~8 GB free for the staged image; none of TMPDIR, $REPODIR/images, /var/tmp, /tmp has enough." >&2
-    exit 1
-}
+WORKBASE="$(pick_workdir)" || die "Need at least 12 GiB free in TMPDIR, images/, /var/tmp, or /tmp."
 WORK="$(mktemp -d "$WORKBASE/openastro-build-XXXXXX")"
 IMG="$WORK/openastro.img"
 MNT="$WORK/rootfs"
 LOOP=""
+EFI_MOUNT=""
 
-log() { echo "[build] $*"; }
 cleanup() {
-    set +e
-    umount -lf "$MNT/dev/pts" "$MNT/dev" "$MNT/proc" "$MNT/sys" 2>/dev/null
-    mountpoint -q "$MNT" && umount -lf "$MNT"
-    [ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
-    rm -rf "$WORK"
+    local status=$?
+    # Never delete through a busy mount or detach a still-mounted filesystem.
+    if ! unmount_image; then
+        echo "[build] Unmount failed; staging retained at $WORK" >&2
+        exit 1
+    fi
+    if [ "$status" -eq 0 ]; then rm -rf -- "$WORK"
+    else echo "[build] Build failed; staging retained at $WORK" >&2; fi
+    exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-[ "$(id -u)" -eq 0 ] || { echo "Must run as root." >&2; exit 1; }
-[ "$(uname -m)" = aarch64 ] || { echo "Build host must be aarch64 (native chroot)." >&2; exit 1; }
-
-log "Staging source image..."
+log "Staging source image (the source is never modified)..."
 case "$SRC" in
     *.xz) xz -dc "$SRC" > "$IMG" ;;
-    *)    cp --reflink=auto "$SRC" "$IMG" ;;
+    *) cp --reflink=auto "$SRC" "$IMG" ;;
 esac
-
-# Grow the image so there's room to install packages in the chroot. The unused
-# space is zeroed and xz-compressed away at the end, so the .img.xz stays small.
-truncate -s +1500M "$IMG"   # extra headroom for custom kernel debs; zeroed+compressed away at the end
+truncate -s +2G "$IMG"
 LOOP=$(losetup -fP --show "$IMG")
-parted -s "$LOOP" resizepart 1 100%
-partprobe "$LOOP" 2>/dev/null || true; sleep 1
-e2fsck -fy "${LOOP}p1" >/dev/null 2>&1 || true
-resize2fs "${LOOP}p1" >/dev/null 2>&1
-mkdir -p "$MNT"
-mount "${LOOP}p1" "$MNT"
-log "rootfs free space: $(df -h "$MNT" | awk 'NR==2{print $4}')"
+prepare_uefi_partitions "$LOOP"
+mount_uefi_image
+log "Root: $ROOT; EFI: $EFI at $EFI_TARGET; free space: $(df -h "$MNT" | awk 'NR==2{print $4}')"
+log "New filesystem identifiers: root=$ROOT_UUID; EFI=$EFI_UUID"
 
-# chroot plumbing (native aarch64, networked via the host)
-mount -t proc proc "$MNT/proc"
-mount -t sysfs sys "$MNT/sys"
-mount -o bind /dev "$MNT/dev"
-mount -t devpts devpts "$MNT/dev/pts"
-# The image's /etc/resolv.conf is a dangling symlink (resolved at runtime), so
-# replace it with a real one for the chroot's apt, and restore it afterwards.
 RESOLV_LINK=$(readlink "$MNT/etc/resolv.conf" 2>/dev/null || true)
+cp -a "$MNT/etc/resolv.conf" "$WORK/resolv.conf" 2>/dev/null || true
 rm -f "$MNT/etc/resolv.conf"
-cp -L /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || echo 'nameserver 8.8.8.8' > "$MNT/etc/resolv.conf"
+cp -L /etc/resolv.conf "$MNT/etc/resolv.conf"
+
+# Do not start package services inside the chroot, or touch host EFI variables.
+if [ -e "$MNT/usr/sbin/policy-rc.d" ] || [ -L "$MNT/usr/sbin/policy-rc.d" ]; then
+    cp -a "$MNT/usr/sbin/policy-rc.d" "$WORK/policy-rc.d"
+fi
+rm -f "$MNT/usr/sbin/policy-rc.d"
+printf '#!/bin/sh\nexit 101\n' > "$MNT/usr/sbin/policy-rc.d"
+chmod 755 "$MNT/usr/sbin/policy-rc.d"
+# Kernel package hooks must not probe/mount the build host's other disks.
+install -d "$MNT/etc/default/grub.d"
+printf 'GRUB_DISABLE_OS_PROBER=true\n' > "$MNT/etc/default/grub.d/99-openastro.cfg"
 
 if [ -n "${KERNEL_DEBS:-}" ]; then
-    ls "$KERNEL_DEBS"/linux-image-*.deb >/dev/null 2>&1 || { echo "KERNEL_DEBS=$KERNEL_DEBS has no linux-image-*.deb" >&2; exit 1; }
-    log "Installing custom kernel debs from $KERNEL_DEBS..."
+    shopt -s nullglob
+    images=("$KERNEL_DEBS"/linux-image-*.deb)
+    [ "${#images[@]}" -gt 0 ] || die "KERNEL_DEBS has no linux-image-*.deb."
+    debs=("${images[@]}" "$KERNEL_DEBS"/linux-dtb-*.deb "$KERNEL_DEBS"/linux-headers-*.deb)
     install -d "$MNT/opt/kernel-debs"
-    cp "$KERNEL_DEBS"/linux-{image,dtb,headers}-*.deb "$MNT/opt/kernel-debs/" 2>/dev/null || cp "$KERNEL_DEBS"/linux-{image,dtb}-*.deb "$MNT/opt/kernel-debs/"
-    chroot "$MNT" /bin/bash -c "dpkg -i /opt/kernel-debs/*.deb"
+    cp "${debs[@]}" "$MNT/opt/kernel-debs/"
+    chroot "$MNT" /bin/bash -c 'dpkg -i /opt/kernel-debs/*.deb'
     rm -rf "$MNT/opt/kernel-debs"
 fi
 
 install -d "$MNT/opt/openastro"
-install -m 0755 "$REPODIR/openastro/openastro-setup.sh" "$MNT/opt/openastro/"
-
-log "Running openastro-setup.sh in chroot..."
-chroot "$MNT" /bin/bash -c "cd /opt/openastro && ./openastro-setup.sh"
+install -m 0755 "$REPODIR"/openastro/*.sh "$MNT/opt/openastro/"
+install -D -m 0644 "$REPODIR/openastro/assets/grub-background.png" "$MNT/opt/openastro/assets/grub-background.png"
+log "Running OpenAstro setup..."
+chroot "$MNT" /bin/bash -c 'cd /opt/openastro && ./openastro-setup.sh'
+if [ -n "${OPENASTRO_INSTALLER_PAYLOAD:-}" ]; then
+    "$REPODIR/build/stage-installer.sh" "$MNT" "$OPENASTRO_INSTALLER_PAYLOAD"
+fi
+refresh_uefi_boot
 
 log "Cleaning image..."
-chroot "$MNT" /bin/bash -c "apt-get clean" || true
-rm -rf "$MNT"/var/lib/apt/lists/* "$MNT"/var/log/* "$MNT"/tmp/* 2>/dev/null || true
-# Recreate the persistent-journal dir the log wipe just removed (matches
-# openastro-setup.sh; systemd-journal is gid 999 on this image, but use the
-# name via chroot to be safe).
+chroot "$MNT" apt-get clean
+rm -rf "$MNT"/var/lib/apt/lists/* "$MNT"/var/log/* "$MNT"/tmp/*
 install -d -m 2755 "$MNT/var/log/journal"
-chroot "$MNT" chgrp systemd-journal /var/log/journal 2>/dev/null || true
-rm -f "$MNT"/etc/ssh/ssh_host_*           # regenerated per-device on first boot
-: > "$MNT/etc/machine-id" 2>/dev/null || true
-rm -f "$MNT/etc/resolv.conf"              # don't ship the build host's DNS
-[ -n "${RESOLV_LINK:-}" ] && ln -sf "$RESOLV_LINK" "$MNT/etc/resolv.conf"  # restore runtime symlink
+chroot "$MNT" chgrp systemd-journal /var/log/journal
+rm -f "$MNT"/etc/ssh/ssh_host_*
+rm -f "$MNT/var/lib/systemd/random-seed"
+: > "$MNT/etc/machine-id"
+rm -f "$MNT/var/lib/dbus/machine-id"
+ln -s /etc/machine-id "$MNT/var/lib/dbus/machine-id"
+rm -f "$MNT/etc/resolv.conf"
+if [ -n "$RESOLV_LINK" ]; then ln -s "$RESOLV_LINK" "$MNT/etc/resolv.conf"
+elif [ -f "$WORK/resolv.conf" ]; then cp "$WORK/resolv.conf" "$MNT/etc/resolv.conf"; fi
+rm -f "$MNT/usr/sbin/policy-rc.d"
+if [ -e "$WORK/policy-rc.d" ] || [ -L "$WORK/policy-rc.d" ]; then
+    cp -a "$WORK/policy-rc.d" "$MNT/usr/sbin/policy-rc.d"
+fi
 
-log "Zero-filling free space (so the image compresses small)..."
+log "Zero-filling free space for compression..."
 dd if=/dev/zero of="$MNT/ZERO.fill" bs=4M status=none 2>/dev/null || true
-sync; rm -f "$MNT/ZERO.fill"; sync
-
-umount -lf "$MNT/dev/pts" "$MNT/dev" "$MNT/proc" "$MNT/sys"
-umount "$MNT"
-losetup -d "$LOOP"; LOOP=""
+sync
+rm -f "$MNT/ZERO.fill"
+sync
+unmount_image
 
 log "Compressing -> $OUT"
 mkdir -p "$(dirname "$OUT")"
-xz -T0 -6 -c "$IMG" > "$OUT"
+TEMP_OUT=$(mktemp "${OUT}.partial-XXXXXX")
+if ! xz -T0 -6 -c "$IMG" > "$TEMP_OUT"; then
+    rm -f "$TEMP_OUT"
+    die "Compression failed."
+fi
+chmod 0644 "$TEMP_OUT"
+mv -nT "$TEMP_OUT" "$OUT"
+[ ! -e "$TEMP_OUT" ] || die "Output appeared during build; compressed image retained at $TEMP_OUT."
 ( cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256" )
 log "Done: $OUT ($(du -h "$OUT" | cut -f1))"
