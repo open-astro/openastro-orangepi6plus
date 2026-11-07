@@ -7,10 +7,11 @@ modified 2026-10-23. Armbian **Debian 13 (Trixie), minimal CLI**, with
 AlpacaBridge preinstalled, a NetworkManager WiFi hotspot, Ethernet DHCP,
 SSH, persistent logs, and ZWO USB HID permissions.
 
-**Status: native build, branded SD boot/artwork, Ethernet-backed hotspot client checks, and physical USB-to-NVMe installation/boot passed; equipment and USB-to-SD installation remain untested.**
-No OpenAstro image release yet. Changes stay
-uncommitted and unpushed until an image builds and passes the hardware checks
-below. Upstream Git history and the GPLv2 license are preserved locally.
+**Status: [v0.1.0](https://github.com/open-astro/openastro-orangepi6plus/releases/tag/v0.1.0) is released and verified on the Orange Pi 6 Plus: the image boots, `astro` login works, and AlpacaBridge runs.**
+Pre-release test builds also passed native build, branded SD boot/artwork,
+Ethernet-backed hotspot client checks, and physical USB-to-NVMe
+installation/boot. **Astronomy equipment and USB-to-SD installation remain
+untested.** Upstream Git history and the GPLv2 license are preserved.
 
 | Hardware | Target |
 |----------|--------|
@@ -31,6 +32,22 @@ initramfs, the removable EFI loader, and GRUB updated so an attached base-image 
 for the new image. Two flashed copies of the same built image still share
 those identifiers; do not attach both copies to the same board.
 
+## Download
+
+Prebuilt images are on the [Releases page](https://github.com/open-astro/openastro-orangepi6plus/releases/latest).
+Download the image and its checksum, verify them, then
+[flash and boot](#flash-and-boot):
+
+```bash
+curl -fLO --retry 3 https://github.com/open-astro/openastro-orangepi6plus/releases/latest/download/openastro-orangepi6plus.img.xz
+curl -fLO --retry 3 https://github.com/open-astro/openastro-orangepi6plus/releases/latest/download/openastro-orangepi6plus.img.xz.sha256
+sha256sum -c openastro-orangepi6plus.img.xz.sha256
+```
+
+v0.1.0 is built from commit `7b89aa5` on Armbian 26.8.3 with the repository
+defaults listed under [First boot defaults](#first-boot-defaults). Build your
+own image, below, to set credentials and the country code in advance.
+
 ## Build on the Orange Pi 6 Plus
 
 Use an already-running **aarch64 Linux** system on the board (or another
@@ -39,20 +56,11 @@ installation. Keep at least **12 GiB free** for staging/output, plus the
 downloaded input. Prefer NVMe for build workspace; never overwrite the
 board's running boot media.
 
-While this work is uncommitted, copy the local worktree to the board rather
-than cloning the intentionally empty GitHub repository:
-
-```bash
-# On your workstation; replace USER and BOARD with your SSH login/host.
-rsync -av --exclude=.git --exclude=.idea --exclude=images --exclude=__pycache__ \
-    ./ USER@BOARD:~/openastro-orangepi6plus/
-```
-
-Then on the board, inside `~/openastro-orangepi6plus`:
-
 ```bash
 sudo apt update
-sudo apt install parted e2fsprogs dosfstools util-linux fdisk udev xz-utils python3 curl
+sudo apt install git parted e2fsprogs dosfstools util-linux fdisk udev xz-utils python3 curl
+git clone https://github.com/open-astro/openastro-orangepi6plus.git
+cd openastro-orangepi6plus
 mkdir -p images
 
 # Only use a trusted Armbian ARM64 UEFI Debian Trixie minimal image.
@@ -112,8 +120,9 @@ console/recovery access. Reboot afterwards.
 For installing from a USB thumb drive onto another SD/NVMe disk, see the
 separate [offline USB installer](installer/README.md). It is experimental
 and requires explicit erase confirmation; it is not part of the normal boot.
+v0.1.0 does not include an installer image, so build it yourself.
 
-Flash the built image to a **separate microSD card** (16 GB+ recommended)
+Flash the downloaded or built image to a **separate microSD card** (16 GB+ recommended)
 with Raspberry Pi Imager or balenaEtcher. Flashing erases the selected device;
 do not select the running system's disk. Insert the card and select its
 UEFI boot entry if another bootable drive takes precedence.
@@ -146,14 +155,16 @@ kernel diagnostics. The [artwork](openastro/assets/README.md) does not replace
 the board's UEFI/CIX startup image or the kernel logo; those are outside
 this filesystem customization. No Plymouth splash stack is added.
 
-**Latest normal test image:** `images/openastro-orangepi6plus-branded.img.xz`.
-Its native build and offline inspection confirm the OpenAstro GRUB background,
-removed factory root-autologin overrides, 48-bit VA, and the ZWO HID fix.
-Physical SD boot, root expansion, password SSH, and basic service/hotspot
-checks passed. The user confirmed visual boot artwork, hotspot client access
-to AlpacaBridge, and internet through Ethernet. Equipment testing remains
-pending. The older unbranded
-artifact booted but retained root autologin; do not use that as a release.
+**Verified on hardware (v0.1.0):** the image boots on the Orange Pi 6 Plus,
+the `astro` login works, and AlpacaBridge runs.
+
+**Pre-release branded test build:** native build and offline inspection
+confirmed the OpenAstro GRUB background, removed factory root-autologin
+overrides, 48-bit VA, and the ZWO HID fix. Physical SD boot, root expansion,
+password SSH, basic service/hotspot checks, visual boot artwork, hotspot client
+access to AlpacaBridge, and internet through Ethernet passed. Equipment testing
+remains pending. An older unbranded test build booted but retained root
+autologin; do not use that build.
 
 ## WiFi: AX210 and other adapters
 
@@ -243,7 +254,7 @@ Also, 39-bit VA is not universally incompatible with ASan: LLVM provides
 a Linux/AArch64 39-bit mapping. A failure on another board needs its exact
 compiler/runtime version and error output, not just the VA-bit count.
 
-## Validation before committing or publishing an image
+## Validation before publishing an image
 
 See [`hardware/orangepi6plus-cix/inventory.md`](hardware/orangepi6plus-cix/inventory.md)
 for the hardware acceptance checklist. Useful diagnostics:

@@ -3,9 +3,12 @@
 **Experimental: physical USB installation and NVMe boot passed on one board;
 physical SD installation remains untested. Automated tests never write real disks.**
 
-## Built test artifact
+## Tested artifact
 
-Available locally as `images/openastro-orangepi6plus-installer.img.xz`
+No installer image is published; v0.1.0 contains only the normal image. The
+results below are for a local pre-release build whose payload was the branded
+test image, not the v0.1.0 image:
+`images/openastro-orangepi6plus-installer.img.xz`
 (801,795,144 bytes compressed; raw `.img` is 9,441,378,304 bytes).
 SHA256:
 `12756d9529cd5554c29916fdc160481ab68ef62b5c265bde5118ff1952c1a278`.
@@ -27,12 +30,15 @@ installer's files or configuration into the target.
 
 ## Build
 
-First build and verify the normal OpenAstro `.img.xz` (including the HID
-requirements, boot branding, and root-autologin fix). On an ARM64 build host:
+Start from a verified normal OpenAstro `.img.xz`: the
+[v0.1.0 release image](https://github.com/open-astro/openastro-orangepi6plus/releases/tag/v0.1.0)
+or your own build (including the HID requirements, boot branding, and
+root-autologin fix). An installer carrying the v0.1.0 image has not yet been
+physically tested. On an ARM64 build host:
 
 ```bash
 sudo build/build-openastro-installer.sh \
-    images/openastro-orangepi6plus-branded.img.xz \
+    images/openastro-orangepi6plus.img.xz \
     images/openastro-orangepi6plus-installer.img.xz
 ```
 
@@ -109,7 +115,7 @@ On an ARM64/root build host, the additional integration test writes only a
 private regular-file-backed **loop device**, then runs the shared EFI backend:
 
 ```bash
-sudo tests/test-installer-loopback.sh images/openastro-orangepi6plus-branded.img.xz
+sudo tests/test-installer-loopback.sh images/openastro-orangepi6plus.img.xz
 ```
 
 Allow roughly 10 GiB free for that temporary test image. This exercises Linux

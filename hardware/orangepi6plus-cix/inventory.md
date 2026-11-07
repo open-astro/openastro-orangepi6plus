@@ -1,7 +1,9 @@
 # Orange Pi 6 Plus — hardware inventory
 
-Port started 2026-10-23. **Native build, offline inspection, and branded SD
-boot/basic runtime checks passed; hotspot client and equipment tests remain pending.** Do not
+Port started 2026-10-23. **v0.1.0 is released and verified on hardware: the
+image boots, `astro` login works, and AlpacaBridge runs. Pre-release builds
+passed hotspot client and USB-to-NVMe installation checks; equipment tests and
+USB-to-SD installation remain pending.** Do not
 inherit the Orange Pi 4 Pro's validation claims, kernel, or WiFi assumptions.
 
 | Item | Target / evidence |
@@ -210,7 +212,21 @@ This supersedes the earlier physical-installer pending notes. Physical SD
 installation and astronomy equipment remain untested. No configuration changes, authentication keys, commits, or
 pushes were made during validation.
 
-## Acceptance checklist — before committing/publishing
+### v0.1.0 release validation
+
+The user confirmed on 2026-11-07 that the published main image boots on the
+Orange Pi 6 Plus, AlpacaBridge runs, and the `astro` login works. The sections
+above describe pre-release builds; their other results were not repeated on
+this artifact unless listed here. The release has no installer image.
+
+| Released artifact | Value |
+|-------------------|-------|
+| File | `openastro-orangepi6plus.img.xz` |
+| Compressed / raw size | 389,897,632 / 7,293,894,656 bytes |
+| SHA256 | `39ad2ffd93b44db8f9db9dc83de01ed82893989b022d762baa379afe5862faa2` |
+| Source | Repository commit `7b89aa5`, Armbian 26.8.3 base, repository defaults |
+
+## Acceptance checklist — before publishing
 
 Local checks on 2026-10-23 (x86_64, no root): 12 Python tests, mocked WiFi
 helper checks, Bash syntax, and ShellCheck passed. The source image's SHA256
@@ -222,11 +238,14 @@ checks are **not** a native build or a boot test.
 - [x] Native build completes on the 6 Plus, including package installation and output checksum.
 - [x] Customized image boots from a separate microSD with existing NVMe disks left untouched.
 - [ ] Root auto-expansion works; ESP/GRUB remain bootable after reboot and kernel update.
-- [ ] Login works without the Armbian first-login wizard; SSH keys and machine IDs differ between fresh devices.
-- [ ] SSH works on first boot; mDNS resolves `openastro.local` on a supporting LAN.
+- [x] Login works without the Armbian first-login wizard.
+- [ ] SSH keys and machine IDs differ between fresh devices.
+- [x] SSH works on first boot.
+- [ ] mDNS resolves `openastro.local` on a supporting LAN.
 - [ ] Each Ethernet port obtains DHCP independently; repeat with both connected.
-- [ ] AX210 firmware loads; actual interface name and `iw list` combinations recorded.
+- [x] AX210 firmware loads; actual interface name and `iw list` combinations recorded.
 - [x] Hotspot `OpenAstro-XXXX` appears, accepts the password, and provides DHCP/DNS at `172.24.1.1`.
+- [x] AlpacaBridge runs on the released image.
 - [ ] Hotspot clients can reach AlpacaBridge on port 6800 with no internet uplink.
 - [x] Hotspot clients get internet through Ethernet (DHCP, DNS, and NAT).
 - [ ] WiFi client mode works; test same-channel AP+client and document the actual behavior.
